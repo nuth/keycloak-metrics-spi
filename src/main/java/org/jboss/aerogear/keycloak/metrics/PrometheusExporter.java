@@ -21,13 +21,13 @@ import java.net.InetAddress;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.net.UnknownHostException;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 public final class PrometheusExporter {
 
@@ -35,8 +35,8 @@ public final class PrometheusExporter {
     private final static String ADMIN_EVENT_PREFIX = "keycloak_admin_event_";
     private final static String PROVIDER_KEYCLOAK_OPENID = "keycloak";
 
-    private final static String PROMETHEUS_PUSHGATEWAY_GROUPINGKEY_INSTANCE = "PROMETHEUS_GROUPING_KEY_INSTANCE";
-    private final static Pattern PROMETHEUS_PUSHGATEWAY_GROUPINGKEY_INSTANCE_ENVVALUE_PATTERN = Pattern.compile("ENVVALUE:(.+?)");
+    private final static Pattern PROMETHEUS_PUSHGATEWAY_GROUPINGKEY_ENVVALUE_PATTERN = Pattern.compile("ENVVALUE:(.+?)");
+    private final static String PROMETHEUS_PUSHGATEWAY_GROUPINGKEY_PREFIX = "PROMETHEUS_GROUPING_KEY_";
 
     private final static String PROMETHEUS_PUSHGATEWAY_JOB = "PROMETHEUS_PUSHGATEWAY_JOB";
 
@@ -508,25 +508,34 @@ public final class PrometheusExporter {
         CompletableFuture.runAsync(() -> push());
     }
 
-    private static String instanceIp() throws UnknownHostException {
-        return InetAddress.getLocalHost().getHostAddress();
+    private static String instanceIp() {
+        try {
+            return InetAddress.getLocalHost().getHostAddress();
+        } catch (UnknownHostException e) {
+            throw new RuntimeException(e);
+        }
     }
 
-    private static String groupingKey() throws UnknownHostException {
-        return Optional.ofNullable(System.getenv(PROMETHEUS_PUSHGATEWAY_GROUPINGKEY_INSTANCE))
-            .map(envValue -> {
-                Matcher matcher = PROMETHEUS_PUSHGATEWAY_GROUPINGKEY_INSTANCE_ENVVALUE_PATTERN.matcher(envValue);
-                if(matcher.matches()) return System.getenv(matcher.group(1));
-                else return envValue;
-            }).orElse(instanceIp());
+    private static Map<String, String> groupingKeys() throws UnknownHostException {
+        Map<String, String> collect = System.getenv().entrySet().stream()
+            .filter(e -> e.getKey().startsWith(PROMETHEUS_PUSHGATEWAY_GROUPINGKEY_PREFIX))
+            .collect(Collectors.toMap(
+                e -> e.getKey().replaceAll(PROMETHEUS_PUSHGATEWAY_GROUPINGKEY_PREFIX, "").toLowerCase(),
+                e -> {
+                    Matcher matcher = PROMETHEUS_PUSHGATEWAY_GROUPINGKEY_ENVVALUE_PATTERN.matcher(e.getValue());
+                    if (matcher.matches()) return System.getenv(matcher.group(1));
+                    else return e.getValue();
+                }));
+        collect.computeIfAbsent("instance", (k) -> instanceIp());
+        return collect;
     }
 
     private void push() {
-        if(PUSH_GATEWAY != null) {
+        if (PUSH_GATEWAY != null) {
             try {
                 String job = Optional.ofNullable(System.getenv(PROMETHEUS_PUSHGATEWAY_JOB)).orElse("keycloak");
-                Map<String, String> groupingKey = Collections.singletonMap("instance", groupingKey());
-                PUSH_GATEWAY.pushAdd(CollectorRegistry.defaultRegistry, job, groupingKey);
+
+                PUSH_GATEWAY.pushAdd(CollectorRegistry.defaultRegistry, job, groupingKeys());
             } catch (IOException e) {
                 logger.error("Unable to send to prometheus PushGateway", e);
             }
